@@ -1,0 +1,107 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from qiskit import QuantumCircuit
+from qiskit_algorithms import EstimationProblem
+from qiskit_algorithms.amplitude_estimators import IterativeAmplitudeEstimation
+from qiskit.primitives import Sampler
+from qiskit_aer import AerSimulator
+
+# Load dataset
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Downsample solar data to match wind data size
+solar_data = solar_data.sample(n=len(wind_data), random_state=42).reset_index(drop=True)
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Merge datasets
+solar_data = solar_data[['V_oc', 'I_sc', 'G_theta', 'T']]
+wind_data = wind_data[['v', 'D', 'H', 'L']]
+dataset = pd.concat([solar_data, wind_data], axis=1).dropna()
+
+# Compute power outputs
+dataset['P_TOTAL'] = dataset.apply(lambda row: P_TOTAL(row['V_oc'], row['I_sc'], row['G_theta'], row['T'], row['v'], row['D'], row['H'], row['L']), axis=1)
+
+# Feature matrix
+X = dataset[['V_oc', 'I_sc', 'G_theta', 'T', 'v', 'D', 'H', 'L']].values
+y = dataset['P_TOTAL'].values
+
+# **Scale Power Output for QAE Encoding**
+scaler = MinMaxScaler(feature_range=(0, 1))  # Normalize power to (0,1)
+y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()
+
+# Quantum Estimation using QAE + Multi-layer Monte Carlo
+num_samples = 5  # Number of Monte Carlo runs
+estimated_outputs_scaled = []
+qae = IterativeAmplitudeEstimation(epsilon_target=0.01, alpha=0.05, sampler=Sampler())
+
+print("\nEstimating Power Outputs using QPMC + QAE...\n")
+
+for i, row in enumerate(X):
+    power_value = y_scaled[i]  # Ensure power is between 0 and 1
+    estimates = []
+
+    for _ in range(num_samples):  # Monte Carlo Sampling
+        # **Quantum Circuit: Multi-layer Amplitude Encoding**
+        qc = QuantumCircuit(3)  # Using 3 qubits
+        qc.ry(2 * np.arcsin(np.sqrt(power_value)), 0)  # Layer 1
+        qc.cry(2 * np.arcsin(np.sqrt(power_value)), 0, 1)  # Layer 2
+        qc.cry(2 * np.arcsin(np.sqrt(power_value)), 1, 2)  # Layer 3 (Multi-layer)
+
+        # **Define Estimation Problem**
+        estimation_problem = EstimationProblem(
+            state_preparation=qc,
+            objective_qubits=[0],  # Measure qubit 0 (which encodes power)
+        )
+
+        # **Run QAE**
+        try:
+            result = qae.estimate(estimation_problem)
+            estimates.append(result.estimation)  # Store each estimate
+        except Exception as e:
+            print(f"Error in QAE estimation at index {i}: {e}")
+            estimates.append(np.nan)
+
+    # **Monte Carlo Averaging**
+    final_estimate = np.nanmean(estimates)  # Compute average
+    estimated_outputs_scaled.append(final_estimate)
+    print(f"Data Point {i+1}: Estimated Power Output (scaled) = {final_estimate:.4f}")
+
+# **Rescale Quantum Outputs Back to Original Scale**
+estimated_outputs = scaler.inverse_transform(np.array(estimated_outputs_scaled).reshape(-1, 1)).flatten()
+
+# Store estimated values in DataFrame
+dataset["Estimated_P_TOTAL"] = estimated_outputs
+
+# Plot Actual vs Estimated Power Output
+plt.figure(figsize=(10, 6))
+plt.plot(dataset.index, dataset["P_TOTAL"], label="Actual Power Output", marker="o")
+plt.plot(dataset.index, dataset["Estimated_P_TOTAL"], label="Estimated Power Output", marker="x", linestyle="dashed")
+plt.xlabel("Data Point")
+plt.ylabel("Power Output (Watts)")
+plt.title("Actual vs Estimated Power Output using QPMC with QAE")
+plt.legend()
+plt.grid(True)
+plt.show()
+# **Save Graph as SVG**
+plt.savefig("QPMC_QAE_Estimated_Power_SW.svg", format="svg")
+plt.show()
+
+print("\nGraph saved as 'QPMC_QAE_Estimated_Power.svg'")
