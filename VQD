@@ -1,0 +1,404 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit.primitives import Estimator, Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_algorithms import VQD
+from qiskit_algorithms.optimizers import AQGD, GradientDescent, NELDER_MEAD
+from qiskit_algorithms.state_fidelities import ComputeUncompute
+from qiskit.circuit import Parameter
+
+# Read CSV Files
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective function for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli Operators
+V_oc_op = SparsePauliOp.from_list([("ZIII", 1)])
+T_op = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_op = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_op = SparsePauliOp.from_list([("IIIZ", 1)])
+v_op = SparsePauliOp.from_list([("ZIII", 1)])
+D_op = SparsePauliOp.from_list([("IZII", 1)])
+H_op = SparsePauliOp.from_list([("IIZI", 1)])
+L_op = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_op + T_op + I_sc_op + G_theta_op + v_op + D_op + H_op + L_op
+
+# Set up Qiskit backend
+service = QiskitRuntimeService()
+backend = service.backend('ibm_sherbrooke')
+options = Options(optimization_level=3)
+
+# Define optimizers
+optimizers = {'AQGD': AQGD(), 'GradientDescent': GradientDescent(), 'NELDER_MEAD': NELDER_MEAD()}
+iteration_data = {opt: {'counts': [], 'values': [], 'min_idx': None, 'min_value': float('inf'), 'data_point': None} for opt in optimizers.keys()}
+
+# Callback function
+def callback(eval_count, params, value, meta, step, optimizer_name):
+    if eval_count > 3000:
+        return
+    iteration_data[optimizer_name]['counts'].append(eval_count)
+    iteration_data[optimizer_name]['values'].append(value)
+    
+    if value < iteration_data[optimizer_name]['min_value']:
+        iteration_data[optimizer_name]['min_value'] = value
+        iteration_data[optimizer_name]['min_idx'] = eval_count
+        data_idx = eval_count % len(v_values)  # Get corresponding data index
+        iteration_data[optimizer_name]['data_point'] = {
+            "V_oc": V_oc_values[data_idx], "I_sc": I_sc_values[data_idx], "T": T_values[data_idx], "G_theta": G_theta_values[data_idx],
+            "v": v_values[data_idx], "D": D_values[data_idx], "H": H_values[data_idx], "L": L_values[data_idx]
+        }
+
+# Custom ansatz function
+def create_custom_ansatz(num_qubits, reps=3):
+    parameters = [Parameter(f'θ_{i}') for i in range(2 * num_qubits * reps)]
+    circuit = QuantumCircuit(num_qubits)
+    idx = 0
+    for _ in range(reps):
+        for qubit in range(num_qubits):
+            circuit.ry(parameters[idx], qubit)
+            idx += 1
+            circuit.rz(parameters[idx], qubit)
+            idx += 1
+        for qubit in range(num_qubits - 1):
+            circuit.cz(qubit, qubit + 1)
+        circuit.cz(num_qubits - 1, 0)
+    return circuit, parameters
+# VQD with deflation
+def run_vqd(optimizer, optimizer_name, num_qubits=4, reps=3, num_states=3):
+    ansatz_circuit, parameters = create_custom_ansatz(num_qubits, reps)
+    estimator = Estimator()
+    sampler = Sampler()
+    fidelity = ComputeUncompute(sampler)
+    eigenvalues = []
+    modified_operator = operator
+    for _ in range(num_states):
+        vqd_instance = VQD(estimator=estimator, ansatz=ansatz_circuit, optimizer=optimizer, fidelity=fidelity,
+                           callback=lambda eval_count, params, value, meta, step: callback(eval_count, params, value, meta, step, optimizer_name))
+        result = vqd_instance.compute_eigenvalues(modified_operator)
+        eigenvalues.append(result.eigenvalues[0].real)
+    return eigenvalues
+# Run VQD with each optimizer
+vqd_results = {opt: [] for opt in optimizers.keys()}
+for opt, optimizer in optimizers.items():
+    vqd_results[opt] = run_vqd(optimizer, opt)
+
+# Plot results
+plt.figure(figsize=(12, 9))
+for opt, data in iteration_data.items():
+    counts = data['counts']
+    values = data['values']
+    plt.plot(counts, values, label=f'{opt} Energy (Min at {data['min_idx']})', linestyle='dashed')
+
+plt.xlabel('Iteration')
+plt.ylabel('Eigenvalue')
+plt.title('VQD Optimization for Solar-Wind Hybrid System')
+plt.legend()
+plt.savefig("solar_wind_vqd1AA.svg", dpi=300)
+plt.show()
+
+# Display final results
+print("\nFinal Minimum Eigenvalues for Each Optimizer:")
+for opt in optimizers.keys():
+    print(f"Optimizer: {opt}, Minimum Eigenvalue: {iteration_data[opt]['min_value']} at Iteration {iteration_data[opt]['min_idx']}")
+    print(f"Corresponding Data Point: {iteration_data[opt]['data_point']}")
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit.primitives import Estimator, Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_algorithms import VQD
+from qiskit_algorithms.optimizers import COBYLA, SPSA, POWELL
+from qiskit_algorithms.state_fidelities import ComputeUncompute
+from qiskit.circuit import Parameter
+
+# Read CSV Files
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective function for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli Operators
+V_oc_op = SparsePauliOp.from_list([("ZIII", 1)])
+T_op = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_op = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_op = SparsePauliOp.from_list([("IIIZ", 1)])
+v_op = SparsePauliOp.from_list([("ZIII", 1)])
+D_op = SparsePauliOp.from_list([("IZII", 1)])
+H_op = SparsePauliOp.from_list([("IIZI", 1)])
+L_op = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_op + T_op + I_sc_op + G_theta_op + v_op + D_op + H_op + L_op
+
+# Set up Qiskit backend
+service = QiskitRuntimeService()
+backend = service.backend('ibm_sherbrooke')
+options = Options(optimization_level=3)
+
+# Define optimizers
+optimizers = {'COBYLA': COBYLA(), 'SPSA': SPSA(), 'POWELL': POWELL()}
+iteration_data = {opt: {'counts': [], 'values': [], 'min_idx': None, 'min_value': float('inf'), 'data_point': None} for opt in optimizers.keys()}
+
+# Callback function
+def callback(eval_count, params, value, meta, step, optimizer_name):
+    if eval_count > 3000:
+        return
+    iteration_data[optimizer_name]['counts'].append(eval_count)
+    iteration_data[optimizer_name]['values'].append(value)
+    
+    if value < iteration_data[optimizer_name]['min_value']:
+        iteration_data[optimizer_name]['min_value'] = value
+        iteration_data[optimizer_name]['min_idx'] = eval_count
+        data_idx = eval_count % len(v_values)  # Get corresponding data index
+        iteration_data[optimizer_name]['data_point'] = {
+            "V_oc": V_oc_values[data_idx], "I_sc": I_sc_values[data_idx], "T": T_values[data_idx], "G_theta": G_theta_values[data_idx],
+            "v": v_values[data_idx], "D": D_values[data_idx], "H": H_values[data_idx], "L": L_values[data_idx]
+        }
+
+# Custom ansatz function
+def create_custom_ansatz(num_qubits, reps=3):
+    parameters = [Parameter(f'θ_{i}') for i in range(2 * num_qubits * reps)]
+    circuit = QuantumCircuit(num_qubits)
+    idx = 0
+    for _ in range(reps):
+        for qubit in range(num_qubits):
+            circuit.ry(parameters[idx], qubit)
+            idx += 1
+            circuit.rz(parameters[idx], qubit)
+            idx += 1
+        for qubit in range(num_qubits - 1):
+            circuit.cz(qubit, qubit + 1)
+        circuit.cz(num_qubits - 1, 0)
+    return circuit, parameters
+# VQD with deflation
+def run_vqd(optimizer, optimizer_name, num_qubits=4, reps=3, num_states=3):
+    ansatz_circuit, parameters = create_custom_ansatz(num_qubits, reps)
+    estimator = Estimator()
+    sampler = Sampler()
+    fidelity = ComputeUncompute(sampler)
+    eigenvalues = []
+    modified_operator = operator
+    for _ in range(num_states):
+        vqd_instance = VQD(estimator=estimator, ansatz=ansatz_circuit, optimizer=optimizer, fidelity=fidelity,
+                           callback=lambda eval_count, params, value, meta, step: callback(eval_count, params, value, meta, step, optimizer_name))
+        result = vqd_instance.compute_eigenvalues(modified_operator)
+        eigenvalues.append(result.eigenvalues[0].real)
+    return eigenvalues
+# Run VQD with each optimizer
+vqd_results = {opt: [] for opt in optimizers.keys()}
+for opt, optimizer in optimizers.items():
+    vqd_results[opt] = run_vqd(optimizer, opt)
+
+# Plot results
+colors = {'COBYLA': 'r', 'SPSA': 'brown', 'POWELL': 'purple'}
+plt.figure(figsize=(12, 9))
+for opt, data in iteration_data.items():
+    counts = data['counts']
+    values = data['values']
+    plt.plot(counts, values, label=f'{opt} Energy (Min at {data['min_idx']})', linestyle='dashed')
+
+plt.xlabel('Iteration')
+plt.ylabel('Eigenvalue')
+plt.title('VQD Optimization for Solar-Wind Hybrid System')
+plt.legend()
+plt.savefig("solar_wind_vqd2.svg", dpi=300)
+plt.show()
+
+# Display final results
+print("\nFinal Minimum Eigenvalues for Each Optimizer:")
+for opt in optimizers.keys():
+    print(f"Optimizer: {opt}, Minimum Eigenvalue: {iteration_data[opt]['min_value']} at Iteration {iteration_data[opt]['min_idx']}")
+    print(f"Corresponding Data Point: {iteration_data[opt]['data_point']}")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit.primitives import Estimator, Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_algorithms import VQD
+from qiskit_algorithms.optimizers import L_BFGS_B, SLSQP, P_BFGS
+from qiskit_algorithms.state_fidelities import ComputeUncompute
+from qiskit.circuit import Parameter
+
+# Read CSV Files
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective function for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli Operators
+V_oc_op = SparsePauliOp.from_list([("ZIII", 1)])
+T_op = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_op = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_op = SparsePauliOp.from_list([("IIIZ", 1)])
+v_op = SparsePauliOp.from_list([("ZIII", 1)])
+D_op = SparsePauliOp.from_list([("IZII", 1)])
+H_op = SparsePauliOp.from_list([("IIZI", 1)])
+L_op = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_op + T_op + I_sc_op + G_theta_op + v_op + D_op + H_op + L_op
+
+# Set up Qiskit backend
+service = QiskitRuntimeService()
+backend = service.backend('ibm_sherbrooke')
+options = Options(optimization_level=3)
+
+# Define optimizers
+optimizers = {'L_BFGS_B': L_BFGS_B(), 'SLSQP': SLSQP(), 'P_BFGS': P_BFGS()}
+iteration_data = {opt: {'counts': [], 'values': [], 'min_idx': None, 'min_value': float('inf'), 'data_point': None} for opt in optimizers.keys()}
+
+# Callback function
+def callback(eval_count, params, value, meta, step, optimizer_name):
+    if eval_count > 3000:
+        return
+    iteration_data[optimizer_name]['counts'].append(eval_count)
+    iteration_data[optimizer_name]['values'].append(value)
+    
+    if value < iteration_data[optimizer_name]['min_value']:
+        iteration_data[optimizer_name]['min_value'] = value
+        iteration_data[optimizer_name]['min_idx'] = eval_count
+        data_idx = eval_count % len(v_values)  # Get corresponding data index
+        iteration_data[optimizer_name]['data_point'] = {
+            "V_oc": V_oc_values[data_idx], "I_sc": I_sc_values[data_idx], "T": T_values[data_idx], "G_theta": G_theta_values[data_idx],
+            "v": v_values[data_idx], "D": D_values[data_idx], "H": H_values[data_idx], "L": L_values[data_idx]
+        }
+
+# Custom ansatz function
+def create_custom_ansatz(num_qubits, reps=3):
+    parameters = [Parameter(f'θ_{i}') for i in range(2 * num_qubits * reps)]
+    circuit = QuantumCircuit(num_qubits)
+    idx = 0
+    for _ in range(reps):
+        for qubit in range(num_qubits):
+            circuit.ry(parameters[idx], qubit)
+            idx += 1
+            circuit.rz(parameters[idx], qubit)
+            idx += 1
+        for qubit in range(num_qubits - 1):
+            circuit.cz(qubit, qubit + 1)
+        circuit.cz(num_qubits - 1, 0)
+    return circuit, parameters
+# VQD with deflation
+def run_vqd(optimizer, optimizer_name, num_qubits=4, reps=3, num_states=3):
+    ansatz_circuit, parameters = create_custom_ansatz(num_qubits, reps)
+    estimator = Estimator()
+    sampler = Sampler()
+    fidelity = ComputeUncompute(sampler)
+    eigenvalues = []
+    modified_operator = operator
+    for _ in range(num_states):
+        vqd_instance = VQD(estimator=estimator, ansatz=ansatz_circuit, optimizer=optimizer, fidelity=fidelity,
+                           callback=lambda eval_count, params, value, meta, step: callback(eval_count, params, value, meta, step, optimizer_name))
+        result = vqd_instance.compute_eigenvalues(modified_operator)
+        eigenvalues.append(result.eigenvalues[0].real)
+    return eigenvalues
+# Run VQD with each optimizer
+vqd_results = {opt: [] for opt in optimizers.keys()}
+for opt, optimizer in optimizers.items():
+    vqd_results[opt] = run_vqd(optimizer, opt)
+
+# Plot results
+colors = {'L_BFGS_B': 'blue', 'SLSQP': 'orange', 'P_BFGS': 'cyan'}
+plt.figure(figsize=(12, 9))
+for opt, data in iteration_data.items():
+    counts = data['counts']
+    values = data['values']
+    plt.plot(counts, values, label=f'{opt} Energy (Min at {data['min_idx']})', linestyle='dashed')
+
+plt.xlabel('Iteration')
+plt.ylabel('Eigenvalue')
+plt.title('VQD Optimization for Solar-Wind Hybrid System')
+plt.legend()
+plt.savefig("solar_wind_vqd3.svg", dpi=300)
+plt.show()
+
+# Display final results
+print("\nFinal Minimum Eigenvalues for Each Optimizer:")
+for opt in optimizers.keys():
+    print(f"Optimizer: {opt}, Minimum Eigenvalue: {iteration_data[opt]['min_value']} at Iteration {iteration_data[opt]['min_idx']}")
+    print(f"Corresponding Data Point: {iteration_data[opt]['data_point']}")
