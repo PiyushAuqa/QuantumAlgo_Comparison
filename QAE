@@ -1,0 +1,125 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit_aer import AerSimulator
+from qiskit.primitives import Sampler  # Adjusted for Qiskit 1.2.1 compatibility
+import random
+
+# Set random seed for reproducibility
+random.seed(42)
+np.random.seed(42)
+
+# Load solar panel and wind turbine data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Ensure equal dataset lengths
+min_length = min(len(solar_data), len(wind_data))
+solar_data = solar_data[:min_length]
+wind_data = wind_data[:min_length]
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective function for solar power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+# Objective function for wind power output
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+# Combined objective function for total power output
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Improved state preparation to encode power output
+def power_to_rotation_angle(power):
+    max_power = np.max(powers) if len(powers) > 0 else 1
+    return np.arcsin(np.clip(power / max_power, 0, 1))
+
+# Define Quantum Circuit for Amplitude Estimation with Power Encoding
+def quantum_amplitude_estimation(power):
+    num_qubits = 3  # Number of qubits for the state preparation circuit
+    qae_circuit = QuantumCircuit(num_qubits)
+
+    # Apply Hadamard to the first two qubits
+    for qubit in range(num_qubits - 1):
+        qae_circuit.h(qubit)
+
+    # Encode power into a rotation on the last qubit
+    angle = power_to_rotation_angle(power)
+    qae_circuit.ry(2 * angle, num_qubits - 1)
+    
+    # Add measurement
+    qae_circuit.measure_all()
+    
+    # Use Sampler to execute the circuit
+    sampler = Sampler()
+    result = sampler.run([qae_circuit]).result()
+    counts = result.quasi_dists[0]
+    estimated_value = counts.get(1, 0) / sum(counts.values())  # Estimate probability of last qubit being 1
+    
+    return estimated_value
+
+# Variables to track optimum values
+optimum_power = -np.inf
+optimum_index = -1
+
+# Iterate over the data points and maximize the objective function P_TOTAL
+powers = []
+for i in range(min_length):
+    # Classical calculation of power
+    P_classical = P_TOTAL(V_oc_values[i], I_sc_values[i], G_theta_values[i], T_values[i],
+                          v_values[i], D_values[i], H_values[i], L_values[i])
+    powers.append(P_classical)
+
+    # Run Quantum Amplitude Estimation (QAE)
+    qae_value = quantum_amplitude_estimation(P_classical)
+
+    # Track the optimum value
+    if P_classical > optimum_power:
+        optimum_power = P_classical
+        optimum_index = i
+
+# Display the data point corresponding to the optimum value
+print(f"Optimum power is {optimum_power:.4f} W achieved at data point {optimum_index+1}:")
+print(f"T = {T_values[optimum_index]:.4f}, G_theta = {G_theta_values[optimum_index]:.4f}, V_oc = {V_oc_values[optimum_index]:.4f}, I_sc = {I_sc_values[optimum_index]:.4f}")
+print(f"v = {v_values[optimum_index]:.4f}, D = {D_values[optimum_index]:.4f}, H = {H_values[optimum_index]:.4f}, L = {L_values[optimum_index]:.4f}")
+
+# Split data into training, validation, and testing sets
+train_size = int(0.7 * len(powers))
+val_size = int(0.15 * len(powers))
+train_powers = powers[:train_size]
+val_powers = powers[train_size:train_size + val_size]
+test_powers = powers[train_size + val_size:]
+
+# Visualize and save the output
+plt.figure(figsize=(12, 6))
+plt.plot(range(len(train_powers)), train_powers, label='Training Data')
+plt.plot(range(len(train_powers), len(train_powers) + len(val_powers)), val_powers, label='Validation Data')
+plt.plot(range(len(train_powers) + len(val_powers), len(powers)), test_powers, label='Testing Data')
+plt.title('Quantum Amplitude Estimation: Solar & Wind Energy')
+plt.xlabel('Data Points')
+plt.ylabel('Estimated Amplitude')
+plt.legend()
+plt.grid(True)
+
+plt.savefig('qae_power_output_solar_wind1.svg', dpi=300)
+plt.show()
