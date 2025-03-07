@@ -1,0 +1,2 @@
+# Quantum Algoritms are implemented by using Jupyter Notebook in Qiskit 1.2.4 
+This study compares multiple quantum algorithms— Variational Quantum Eigensolver (VQE), Variational Quantum Deflation (VQD), Quantum Approximate Optimization Algorithm (QAOA), Quantum Amplitude Estimation (QAE), Quantum Neural Networks (QNN), Quantum Parallel Multi-layer Monte Carlo (QPMC) with QAE, and Quantum-Inspired Evolutionary Optimization (QIEO)—to optimize power extraction from solar photovoltaic (PV) panels and bladeless wind turbines (Bl-WT). The respective datasets have also been added.
