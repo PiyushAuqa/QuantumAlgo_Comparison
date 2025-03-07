@@ -1,0 +1,495 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit.circuit import Parameter
+from qiskit import QuantumCircuit
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from sklearn.preprocessing import StandardScaler
+
+# Load solar and wind data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Downsample solar data to match wind data size
+solar_data = solar_data.sample(n=len(wind_data), random_state=42).reset_index(drop=True)
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Extract solar and wind data
+V_oc = solar_data['V_oc'].values
+I_sc = solar_data['I_sc'].values
+G_theta = solar_data['G_theta'].values
+T = solar_data['T'].values
+
+v = wind_data['v'].values
+D = wind_data['D'].values
+H = wind_data['H'].values
+L = wind_data['L'].values
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Calculate power output
+P = P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L)
+X = np.vstack((V_oc, I_sc, G_theta, T, v, D, H, L)).T
+
+# Normalize input features and output labels
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+y = P / np.max(P)
+
+# Split data into training, validation, and testing sets
+split_train = int(0.7 * len(X))
+split_val = int(0.9 * len(X))
+
+X_train, y_train = X[:split_train], y[:split_train]
+X_val, y_val = X[split_train:split_val], y[split_train:split_val]
+X_test, y_test = X[split_val:], y[split_val:]
+
+# Define Ansatz
+def create_quantum_ansatz(num_inputs, num_weights):
+    circuit = QuantumCircuit(num_inputs)
+    input_params = [Parameter(f'input_{i}') for i in range(num_inputs)]
+    weight_params = [Parameter(f'weight_{i}') for i in range(num_weights)]
+    
+    for i in range(num_inputs):
+        circuit.ry(input_params[i], i)
+    for i in range(num_weights):
+        circuit.ry(weight_params[i], i % num_inputs)
+    for i in range(num_inputs - 1):
+        circuit.cx(i, i + 1)
+    
+    return circuit, input_params, weight_params
+
+# Create QNN
+ansatz_circuit, input_params, weight_params = create_quantum_ansatz(8, 8)
+qnn = EstimatorQNN(circuit=ansatz_circuit, observables=None, input_params=input_params, weight_params=weight_params)
+
+# Hyperparameters
+learning_rate = 0.001
+num_epochs = 100
+
+# Initialize weights
+weights = np.random.uniform(-0.01, 0.01, size=len(weight_params))
+
+def mse_loss(predictions, targets):
+    return np.mean((predictions - targets) ** 2)
+
+# Manual training loop without TensorFlow
+train_losses, val_losses, test_losses = [], [], []
+
+for epoch in range(num_epochs):
+    predictions_train = qnn.forward(X_train, weights)
+    train_loss = mse_loss(predictions_train, y_train)
+    
+    gradient = 2 * (predictions_train - y_train)
+    weights -= learning_rate * gradient.mean()
+    
+    predictions_val = qnn.forward(X_val, weights)
+    val_loss = mse_loss(predictions_val, y_val)
+    
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}')
+
+# Testing the model
+predictions_test = qnn.forward(X_test, weights)
+test_loss = mse_loss(predictions_test, y_test)
+test_losses.append(test_loss)
+
+print(f'Test Loss: {test_loss}')
+
+# Plot losses
+plt.figure()
+plt.plot(range(num_epochs), train_losses, label='Training Loss')
+plt.plot(range(num_epochs), val_losses, label='Validation Loss')
+plt.plot([num_epochs], test_losses, marker='o', color="red", label='Test Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training, Validation, and Test Loss - Solar & Wind Energy')
+plt.legend()
+plt.savefig('qnn_solar_wind_1A.svg', format='svg')
+plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit.circuit import Parameter
+from qiskit import QuantumCircuit
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from sklearn.preprocessing import StandardScaler
+
+# Load solar and wind data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Downsample solar data to match wind data size
+solar_data = solar_data.sample(n=len(wind_data), random_state=42).reset_index(drop=True)
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Extract solar and wind data
+V_oc = solar_data['V_oc'].values
+I_sc = solar_data['I_sc'].values
+G_theta = solar_data['G_theta'].values
+T = solar_data['T'].values
+
+v = wind_data['v'].values
+D = wind_data['D'].values
+H = wind_data['H'].values
+L = wind_data['L'].values
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Calculate power output
+P = P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L)
+X = np.vstack((V_oc, I_sc, G_theta, T, v, D, H, L)).T
+
+# Normalize input features and output labels
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+y = P / np.max(P)
+
+# Split data into training, validation, and testing sets
+split_train = int(0.7 * len(X))  # 70% for training
+split_val = split_train + int(0.15 * len(X))
+
+X_train, y_train = X[:split_train], y[:split_train]
+X_val, y_val = X[split_train:split_val], y[split_train:split_val]
+X_test, y_test = X[split_val:], y[split_val:]
+
+# Define Ansatz
+def create_quantum_ansatz(num_inputs, num_weights):
+    circuit = QuantumCircuit(num_inputs)
+    input_params = [Parameter(f'input_{i}') for i in range(num_inputs)]
+    weight_params = [Parameter(f'weight_{i}') for i in range(num_weights)]
+    
+    for i in range(num_inputs):
+        circuit.ry(input_params[i], i)
+    for i in range(num_weights):
+        circuit.ry(weight_params[i], i % num_inputs)
+    for i in range(num_inputs - 1):
+        circuit.cx(i, i + 1)
+    
+    return circuit, input_params, weight_params
+
+# Create QNN
+ansatz_circuit, input_params, weight_params = create_quantum_ansatz(8, 8)
+qnn = EstimatorQNN(circuit=ansatz_circuit, observables=None, input_params=input_params, weight_params=weight_params)
+
+# Hyperparameters
+learning_rate = 0.001
+num_epochs = 100
+
+# Initialize weights
+weights = np.random.uniform(-0.01, 0.01, size=len(weight_params))
+
+def mse_loss(predictions, targets):
+    return np.mean((predictions - targets) ** 2)
+
+# Manual training loop without TensorFlow
+train_losses, val_losses, test_losses = [], [], []
+
+for epoch in range(num_epochs):
+    predictions_train = qnn.forward(X_train, weights)
+    train_loss = mse_loss(predictions_train, y_train)
+    
+    gradient = 2 * (predictions_train - y_train)
+    weights -= learning_rate * gradient.mean()
+    
+    predictions_val = qnn.forward(X_val, weights)
+    val_loss = mse_loss(predictions_val, y_val)
+    
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}')
+
+# Testing the model
+predictions_test = qnn.forward(X_test, weights)
+test_loss = mse_loss(predictions_test, y_test)
+test_losses.append(test_loss)
+
+print(f'Test Loss: {test_loss}')
+
+# Plot losses
+plt.figure()
+plt.plot(range(num_epochs), train_losses, label='Training Loss')
+plt.plot(range(num_epochs), val_losses, label='Validation Loss')
+plt.plot([num_epochs], test_losses, marker='o', color="red", label='Test Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training, Validation, and Test Loss - Solar & Wind Energy')
+plt.legend(loc='upper left')
+plt.savefig('qnn_solar_wind_1B.svg', format='svg')
+plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit.circuit import Parameter
+from qiskit import QuantumCircuit
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from sklearn.preprocessing import StandardScaler
+
+# Load solar and wind data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Downsample solar data to match wind data size
+solar_data = solar_data.sample(n=len(wind_data), random_state=42).reset_index(drop=True)
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Extract solar and wind data
+V_oc = solar_data['V_oc'].values
+I_sc = solar_data['I_sc'].values
+G_theta = solar_data['G_theta'].values
+T = solar_data['T'].values
+
+v = wind_data['v'].values
+D = wind_data['D'].values
+H = wind_data['H'].values
+L = wind_data['L'].values
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Calculate power output
+P = P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L)
+X = np.vstack((V_oc, I_sc, G_theta, T, v, D, H, L)).T
+
+# Normalize input features and output labels
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+y = P / np.max(P)
+
+# Split data into training, validation, and testing sets
+split_train = int(0.7 * len(X))
+split_val = int(0.9 * len(X))
+
+X_train, y_train = X[:split_train], y[:split_train]
+X_val, y_val = X[split_train:split_val], y[split_train:split_val]
+X_test, y_test = X[split_val:], y[split_val:]
+
+# Define Ansatz
+def create_quantum_ansatz(num_inputs, num_weights):
+    circuit = QuantumCircuit(num_inputs)
+    input_params = [Parameter(f'input_{i}') for i in range(num_inputs)]
+    weight_params = [Parameter(f'weight_{i}') for i in range(num_weights)]
+    
+    for i in range(num_inputs):
+        circuit.ry(input_params[i], i)
+    for i in range(num_weights):
+        circuit.ry(weight_params[i], i % num_inputs)
+    for i in range(num_inputs - 1):
+        circuit.cx(i, i + 1)
+    
+    return circuit, input_params, weight_params
+
+# Create QNN
+ansatz_circuit, input_params, weight_params = create_quantum_ansatz(8, 8)
+qnn = EstimatorQNN(circuit=ansatz_circuit, observables=None, input_params=input_params, weight_params=weight_params)
+
+# Hyperparameters
+learning_rate = 0.0005  # Reduce learning rate for stable updates
+num_epochs = 200  # Increase epochs for better convergence
+
+# Initialize weights
+weights = np.random.uniform(-0.01, 0.01, size=len(weight_params))
+
+def mse_loss(predictions, targets):
+    return np.mean((predictions - targets) ** 2)
+
+# Manual training loop without TensorFlow
+train_losses, val_losses, test_losses = [], [], []
+
+for epoch in range(num_epochs):
+    predictions_train = qnn.forward(X_train, weights)
+    train_loss = mse_loss(predictions_train, y_train)
+    
+    gradient = 2 * (predictions_train - y_train)
+    weights -= learning_rate * np.clip(gradient.mean(), -1, 1)  # Gradient clipping to avoid large updates
+    
+    predictions_val = qnn.forward(X_val, weights)
+    val_loss = mse_loss(predictions_val, y_val)
+    
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}')
+
+# Testing the model
+predictions_test = qnn.forward(X_test, weights)
+test_loss = mse_loss(predictions_test, y_test)
+test_losses.append(test_loss)
+
+print(f'Test Loss: {test_loss}')
+
+# Plot losses
+plt.figure()
+plt.plot(range(num_epochs), train_losses, label='Training Loss')
+plt.plot(range(num_epochs), val_losses, label='Validation Loss')
+plt.plot([num_epochs], test_losses, marker='o', color="red", label='Test Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training, Validation, and Test Loss - Solar & Wind Energy')
+plt.legend(loc='upper left')
+plt.savefig('qnn_solar_wind1C.svg', format='svg')
+plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit.circuit import Parameter
+from qiskit import QuantumCircuit
+from qiskit_machine_learning.neural_networks import EstimatorQNN
+from sklearn.preprocessing import StandardScaler
+
+# Load solar and wind data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Downsample solar data to match wind data size
+solar_data = solar_data.sample(n=len(wind_data), random_state=42).reset_index(drop=True)
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Extract solar and wind data
+V_oc = solar_data['V_oc'].values
+I_sc = solar_data['I_sc'].values
+G_theta = solar_data['G_theta'].values
+T = solar_data['T'].values
+
+v = wind_data['v'].values
+D = wind_data['D'].values
+H = wind_data['H'].values
+L = wind_data['L'].values
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Calculate power output
+P = P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L)
+X = np.vstack((V_oc, I_sc, G_theta, T, v, D, H, L)).T
+
+# Normalize input features and output labels
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+y = P / np.max(P)
+
+# Split data into training, validation, and testing sets
+split_train = int(0.7 * len(X))  # 70% for training
+split_val = split_train + int(0.15 * len(X))
+
+X_train, y_train = X[:split_train], y[:split_train]
+X_val, y_val = X[split_train:split_val], y[split_train:split_val]
+X_test, y_test = X[split_val:], y[split_val:]
+
+# Define Ansatz
+def create_quantum_ansatz(num_inputs, num_weights):
+    circuit = QuantumCircuit(num_inputs)
+    input_params = [Parameter(f'input_{i}') for i in range(num_inputs)]
+    weight_params = [Parameter(f'weight_{i}') for i in range(num_weights)]
+    
+    for i in range(num_inputs):
+        circuit.ry(input_params[i], i)
+    for i in range(num_weights):
+        circuit.ry(weight_params[i], i % num_inputs)
+    for i in range(num_inputs - 1):
+        circuit.cx(i, i + 1)
+    
+    return circuit, input_params, weight_params
+
+# Create QNN
+ansatz_circuit, input_params, weight_params = create_quantum_ansatz(8, 8)
+qnn = EstimatorQNN(circuit=ansatz_circuit, observables=None, input_params=input_params, weight_params=weight_params)
+
+# Hyperparameters
+learning_rate = 0.0005  # Reduce learning rate for stable updates
+num_epochs = 200  # Increase epochs for better convergence
+
+# Initialize weights
+weights = np.random.uniform(-0.01, 0.01, size=len(weight_params))
+
+def mse_loss(predictions, targets):
+    return np.mean((predictions - targets) ** 2)
+
+# Manual training loop without TensorFlow
+train_losses, val_losses, test_losses = [], [], []
+
+for epoch in range(num_epochs):
+    predictions_train = qnn.forward(X_train, weights)
+    train_loss = mse_loss(predictions_train, y_train)
+    
+    gradient = 2 * (predictions_train - y_train)
+    weights -= learning_rate * np.clip(gradient.mean(), -1, 1)  # Gradient clipping to avoid large updates
+    
+    predictions_val = qnn.forward(X_val, weights)
+    val_loss = mse_loss(predictions_val, y_val)
+    
+    train_losses.append(train_loss)
+    val_losses.append(val_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss}, Validation Loss: {val_loss}')
+
+# Testing the model
+predictions_test = qnn.forward(X_test, weights)
+test_loss = mse_loss(predictions_test, y_test)
+test_losses.append(test_loss)
+
+print(f'Test Loss: {test_loss}')
+
+# Plot losses
+plt.figure()
+plt.plot(range(num_epochs), train_losses, label='Training Loss')
+plt.plot(range(num_epochs), val_losses, label='Validation Loss')
+plt.plot([num_epochs], test_losses, marker='o', color="red", label='Test Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training, Validation, and Test Loss - Solar & Wind Energy')
+plt.legend(loc='upper left')
+plt.savefig('qnn_solar_wind1D.svg', format='svg')
+plt.show()
