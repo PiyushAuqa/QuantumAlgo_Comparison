@@ -1,0 +1,432 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import TwoLocal
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.primitives import StatevectorEstimator
+from qiskit_algorithms.optimizers import COBYLA, SPSA, POWELL
+from qiskit_algorithms.minimum_eigensolvers import VQE
+
+# Read CSV File containing solar panel values
+csv_file_path_solar = "E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv"
+data_solar = pd.read_csv(csv_file_path_solar)
+
+# Extract solar panel data columns
+V_oc_values = data_solar['V_oc'].values
+I_sc_values = data_solar['I_sc'].values
+T_values = data_solar['T'].values
+G_theta_values = data_solar['G_theta'].values
+
+# Read CSV File containing wind turbine values
+csv_file_path_wind = "E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv"
+data_wind = pd.read_csv(csv_file_path_wind)
+
+# Extract wind turbine data columns
+v_values = data_wind['v'].values
+D_values = data_wind['D'].values
+H_values = data_wind['H'].values
+L_values = data_wind['L'].values
+
+# Constants
+T_ref = 25
+G_ref = 1000
+R = 0.700
+r_s = 18.15
+k_V = -0.24
+k_I = 0.04
+eta = 0.3
+rho = 1.225
+
+# Objective function for power output
+
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adjusted = V_oc - k_V * (T - T_ref)
+    I_adjusted = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    impedance_factor = R / (R + r_s)
+    return V_adjusted * I_adjusted * impedance_factor
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define operators
+V_oc_operator = SparsePauliOp.from_list([("ZIII", 1)])
+T_operator = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_operator = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+v_operator = SparsePauliOp.from_list([("ZIII", 1)])
+D_operator = SparsePauliOp.from_list([("IZII", 1)])
+H_operator = SparsePauliOp.from_list([("IIZI", 1)])
+L_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_operator + T_operator + I_sc_operator + G_theta_operator + v_operator + D_operator + H_operator + L_operator
+
+# Track data
+iteration_data = {}
+convergence_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+    if optimizer_name not in convergence_data:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+    elif float(mean) < convergence_data[optimizer_name]["lowest_energy"]:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+
+# Run VQE using qiskit_algorithms.minimum_eigensolvers.VQE
+
+def run_vqe(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    num_qubits = operator.num_qubits
+    var_form = TwoLocal(
+        num_qubits=num_qubits,
+        rotation_blocks=['ry', 'rz'],
+        entanglement_blocks='cz',
+        reps=3,
+        entanglement='full'
+    )
+    estimator = StatevectorEstimator()
+
+    def evaluate_energy(params):
+        # Assign parameters to the ansatz
+        ansatz = var_form.assign_parameters(params)
+        # Run the estimator
+        job = estimator.run([(ansatz, operator)])
+        result = job.result()
+        # Access the energy value (scalar)
+        energy = result._pub_results[0].data.evs
+        return energy
+
+    # Wrap the evaluate_energy for the optimizer
+    def objective_function(params):
+        energy = evaluate_energy(params)
+        callback(len(iteration_data[optimizer_name]) + 1, params, energy, 0, optimizer_name)
+        return energy
+
+    # Run the optimizer
+    initial_params = np.random.random(var_form.num_parameters)
+    result = optimizer.minimize(fun=objective_function, x0=initial_params)
+
+    return result
+
+# Optimizers
+optimizers = {
+    'COBYLA': COBYLA(maxiter=100),
+    'SPSA': SPSA(maxiter=100),
+    'POWELL': POWELL(options={'maxiter': 100})
+}
+
+# Run VQE with each optimizer
+vqe_results = {}
+for optimizer_name, optimizer in optimizers.items():
+    vqe_results[optimizer_name] = run_vqe(optimizer, optimizer_name)
+
+# Plot results
+colors = {'COBYLA': 'r', 'SPSA': 'g', 'POWELL': 'purple'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (VQE)', color=colors[optimizer_name])
+    lowest_energy = convergence_data[optimizer_name]["lowest_energy"]
+    convergence_iteration = convergence_data[optimizer_name]["iterations_to_convergence"]
+    plt.scatter(convergence_iteration, lowest_energy, color=colors[optimizer_name], marker='o', s=100, edgecolor='black',
+                label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_iteration} iterations)')
+
+plt.xlabel('Iteration')
+plt.ylabel('Energy')
+plt.title('VQE Optimization Progress with Different Optimizers - Solar and Wind')
+plt.legend()
+plt.savefig("vqe_optimization_solar_wind.svg", dpi=300)
+plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import TwoLocal
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.primitives import StatevectorEstimator
+from qiskit_algorithms.optimizers import L_BFGS_B, SLSQP, P_BFGS
+from qiskit_algorithms.minimum_eigensolvers import VQE
+
+# Read CSV File containing solar panel values
+csv_file_path_solar = "E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv"
+data_solar = pd.read_csv(csv_file_path_solar)
+
+# Extract solar panel data columns
+V_oc_values = data_solar['V_oc'].values
+I_sc_values = data_solar['I_sc'].values
+T_values = data_solar['T'].values
+G_theta_values = data_solar['G_theta'].values
+
+# Read CSV File containing wind turbine values
+csv_file_path_wind = "E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv"
+data_wind = pd.read_csv(csv_file_path_wind)
+
+# Extract wind turbine data columns
+v_values = data_wind['v'].values
+D_values = data_wind['D'].values
+H_values = data_wind['H'].values
+L_values = data_wind['L'].values
+
+# Constants
+T_ref = 25
+G_ref = 1000
+R = 0.700
+r_s = 18.15
+k_V = -0.24
+k_I = 0.04
+eta = 0.3
+rho = 1.225
+
+# Objective function for power output
+
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adjusted = V_oc - k_V * (T - T_ref)
+    I_adjusted = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    impedance_factor = R / (R + r_s)
+    return V_adjusted * I_adjusted * impedance_factor
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define operators
+V_oc_operator = SparsePauliOp.from_list([("ZIII", 1)])
+T_operator = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_operator = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+v_operator = SparsePauliOp.from_list([("ZIII", 1)])
+D_operator = SparsePauliOp.from_list([("IZII", 1)])
+H_operator = SparsePauliOp.from_list([("IIZI", 1)])
+L_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_operator + T_operator + I_sc_operator + G_theta_operator + v_operator + D_operator + H_operator + L_operator
+
+# Track data
+iteration_data = {}
+convergence_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+    if optimizer_name not in convergence_data:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+    elif float(mean) < convergence_data[optimizer_name]["lowest_energy"]:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+
+# Run VQE using qiskit_algorithms.minimum_eigensolvers.VQE
+
+def run_vqe(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    num_qubits = operator.num_qubits
+    var_form = TwoLocal(
+        num_qubits=num_qubits,
+        rotation_blocks=['ry', 'rz'],
+        entanglement_blocks='cz',
+        reps=3,
+        entanglement='full'
+    )
+    estimator = StatevectorEstimator()
+
+    def evaluate_energy(params):
+        # Assign parameters to the ansatz
+        ansatz = var_form.assign_parameters(params)
+        # Run the estimator
+        job = estimator.run([(ansatz, operator)])
+        result = job.result()
+        # Access the energy value (scalar)
+        energy = result._pub_results[0].data.evs
+        return energy
+
+    # Wrap the evaluate_energy for the optimizer
+    def objective_function(params):
+        energy = evaluate_energy(params)
+        callback(len(iteration_data[optimizer_name]) + 1, params, energy, 0, optimizer_name)
+        return energy
+
+    # Run the optimizer
+    initial_params = np.random.random(var_form.num_parameters)
+    result = optimizer.minimize(fun=objective_function, x0=initial_params)
+
+    return result
+
+# Optimizers
+optimizers = {
+    'L_BFGS_B': L_BFGS_B(maxiter=100),
+    'SLSQP': SLSQP(maxiter=100),
+    'P_BFGS': P_BFGS(options={'maxiter': 100})
+}
+
+# Run VQE with each optimizer
+vqe_results = {}
+for optimizer_name, optimizer in optimizers.items():
+    vqe_results[optimizer_name] = run_vqe(optimizer, optimizer_name)
+
+# Plot results
+colors = {'L_BFGS_B': 'b', 'SLSQP': 'm', 'P_BFGS': 'orange'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (VQE)', color=colors[optimizer_name])
+    lowest_energy = convergence_data[optimizer_name]["lowest_energy"]
+    convergence_iteration = convergence_data[optimizer_name]["iterations_to_convergence"]
+    plt.scatter(convergence_iteration, lowest_energy, color=colors[optimizer_name], marker='o', s=100, edgecolor='black',
+                label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_iteration} iterations)')
+
+plt.xlabel('Iteration')
+plt.ylabel('Energy')
+plt.title('VQE Optimization Progress with Different Optimizers - Solar and Wind')
+plt.legend()
+plt.savefig("vqe_optimization_solar_wind_1.svg", dpi=300)
+plt.show()
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import TwoLocal
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.primitives import StatevectorEstimator
+from qiskit_algorithms.optimizers import AQGD, GradientDescent, NELDER_MEAD
+from qiskit_algorithms.minimum_eigensolvers import VQE
+
+# Read CSV File containing solar panel values
+csv_file_path_solar = "E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv"
+data_solar = pd.read_csv(csv_file_path_solar)
+
+# Extract solar panel data columns
+V_oc_values = data_solar['V_oc'].values
+I_sc_values = data_solar['I_sc'].values
+T_values = data_solar['T'].values
+G_theta_values = data_solar['G_theta'].values
+
+# Read CSV File containing wind turbine values
+csv_file_path_wind = "E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv"
+data_wind = pd.read_csv(csv_file_path_wind)
+
+# Extract wind turbine data columns
+v_values = data_wind['v'].values
+D_values = data_wind['D'].values
+H_values = data_wind['H'].values
+L_values = data_wind['L'].values
+
+# Constants
+T_ref = 25
+G_ref = 1000
+R = 0.700
+r_s = 18.15
+k_V = -0.24
+k_I = 0.04
+eta = 0.3
+rho = 1.225
+
+# Objective function for power output
+
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adjusted = V_oc - k_V * (T - T_ref)
+    I_adjusted = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    impedance_factor = R / (R + r_s)
+    return V_adjusted * I_adjusted * impedance_factor
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define operators
+V_oc_operator = SparsePauliOp.from_list([("ZIII", 1)])
+T_operator = SparsePauliOp.from_list([("IZII", 1)])
+I_sc_operator = SparsePauliOp.from_list([("IIZI", 1)])
+G_theta_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+v_operator = SparsePauliOp.from_list([("ZIII", 1)])
+D_operator = SparsePauliOp.from_list([("IZII", 1)])
+H_operator = SparsePauliOp.from_list([("IIZI", 1)])
+L_operator = SparsePauliOp.from_list([("IIIZ", 1)])
+operator = V_oc_operator + T_operator + I_sc_operator + G_theta_operator + v_operator + D_operator + H_operator + L_operator
+
+# Track data
+iteration_data = {}
+convergence_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+    if optimizer_name not in convergence_data:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+    elif float(mean) < convergence_data[optimizer_name]["lowest_energy"]:
+        convergence_data[optimizer_name] = {"lowest_energy": float(mean), "iterations_to_convergence": eval_count}
+
+# Run VQE using qiskit_algorithms.minimum_eigensolvers.VQE
+
+def run_vqe(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    num_qubits = operator.num_qubits
+    var_form = TwoLocal(
+        num_qubits=num_qubits,
+        rotation_blocks=['ry', 'rz'],
+        entanglement_blocks='cz',
+        reps=3,
+        entanglement='full'
+    )
+    estimator = StatevectorEstimator()
+
+    def evaluate_energy(params):
+        ansatz = var_form.assign_parameters(params)
+        job = estimator.run([(ansatz, operator)])
+        result = job.result()
+        # Direct scalar extraction without indexing
+        energy = float(result._pub_results[0].data.evs)  
+        return energy
+
+    # Wrap the evaluate_energy for the optimizer
+    def objective_function(params):
+        energy = evaluate_energy(params)
+        callback(len(iteration_data[optimizer_name]) + 1, params, energy, 0, optimizer_name)
+        return energy
+
+    # Run the optimizer
+    initial_params = np.random.random(var_form.num_parameters)
+    result = optimizer.minimize(fun=objective_function, x0=initial_params)
+
+    return result
+
+# Optimizers
+optimizers = {
+    'AQGD': AQGD(maxiter=100),
+    'GradientDescent': GradientDescent(maxiter=100),
+    'NELDER_MEAD': NELDER_MEAD(maxiter=100)
+}
+
+# Run VQE with each optimizer
+vqe_results = {}
+for optimizer_name, optimizer in optimizers.items():
+    vqe_results[optimizer_name] = run_vqe(optimizer, optimizer_name)
+
+# Plot results
+colors = {'AQGD': 'c', 'GradientDescent': 'y', 'NELDER_MEAD': 'k'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (VQE)', color=colors[optimizer_name])
+    lowest_energy = convergence_data[optimizer_name]["lowest_energy"]
+    convergence_iteration = convergence_data[optimizer_name]["iterations_to_convergence"]
+    plt.scatter(convergence_iteration, lowest_energy, color=colors[optimizer_name], marker='o', s=100, edgecolor='black',
+                label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_iteration} iterations)')
+
+plt.xlabel('Iteration')
+plt.ylabel('Energy')
+plt.title('VQE Optimization Progress with Different Optimizers - Solar and Wind')
+plt.legend()
+plt.savefig("vqe_optimization_solar_wind_2.svg", dpi=300)
+plt.show()
