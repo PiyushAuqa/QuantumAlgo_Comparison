@@ -1,0 +1,220 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load Solar & Wind Data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Adjust data sizes to match
+solar_data = solar_data.iloc[:3066]
+
+# Extract values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Quantum-Inspired Evolutionary Optimization (QIEO) Implementation
+class QuantumIndividual:
+    def __init__(self, num_qubits):
+        self.alpha = np.random.uniform(0.4, 1.0, num_qubits)  # Increased randomness
+        self.beta = np.sqrt(1 - self.alpha**2)
+
+    def measure(self):
+        probabilities = np.vstack((self.alpha**2, self.beta**2)).T
+        measurement = np.array([np.random.choice([0, 1], p=p) for p in probabilities])
+        return measurement
+
+    def update(self, best_solution, delta_theta):
+        for i in range(len(self.alpha)):
+            theta = delta_theta if best_solution[i] == 1 else -delta_theta
+            cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+            self.alpha[i], self.beta[i] = (
+                cos_theta * self.alpha[i] - sin_theta * self.beta[i],
+                sin_theta * self.alpha[i] + cos_theta * self.beta[i]
+            )
+
+class QIEO:
+    def __init__(self, population_size, num_qubits, max_iterations=1000):
+        self.population_size = population_size
+        self.num_qubits = num_qubits
+        self.max_iterations = max_iterations
+        self.population = [QuantumIndividual(num_qubits) for _ in range(population_size)]
+
+    def optimize(self, power_function, data):
+        best_powers = []
+        population_sizes = list(range(10, 1010, 10))
+        
+        for pop_size in population_sizes:
+            print(f"Running optimization for population size: {pop_size}")
+            self.population = [QuantumIndividual(self.num_qubits) for _ in range(pop_size)]
+            best_solution = None
+            best_power = float('-inf')
+            data_list = list(data)
+            delta_theta = 0.4
+
+            for iteration in range(self.max_iterations):
+                classical_population = np.array([ind.measure() for ind in self.population])
+                power_outputs = np.array([power_function(*data_list[i % len(data_list)]) for i in range(len(classical_population))])
+
+                best_idx = np.argmax(power_outputs)
+                if power_outputs[best_idx] > best_power:
+                    best_solution = classical_population[best_idx]
+                    best_power = power_outputs[best_idx]
+
+                for individual in self.population:
+                    individual.update(best_solution, delta_theta)
+
+            best_powers.append(best_power)
+            print(f"Best power for population {pop_size}: {best_power}")
+
+        # Visualization
+        plt.figure(figsize=(10, 5))
+        plt.plot(population_sizes, best_powers, label='Best Power Output', marker='o', color='blue')
+        plt.xlabel('Population Size')
+        plt.ylabel('Optimized Power Output')
+        plt.title('Effect of Population Size on Optimization')
+        plt.legend()
+        plt.grid()
+        plt.savefig("qieo_population_vs_power4E.svg", format='svg')
+        plt.show()
+
+# Run Optimization
+data_tuples = list(zip(V_oc_values, I_sc_values, G_theta_values, T_values, v_values, D_values, H_values, L_values))
+# Population size will vary dynamically in optimize function, so no need to set a fixed value
+# qieo = QIEO(population_size=100, num_qubits=8, max_iterations=5000)
+qieo = QIEO(population_size=10, num_qubits=8, max_iterations=5000)
+qieo.optimize(P_TOTAL, data_tuples)
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load Solar & Wind Data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Adjust data sizes to match
+solar_data = solar_data.iloc[:3066]
+
+# Extract values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Quantum-Inspired Evolutionary Optimization (QIEO) Implementation
+class QuantumIndividual:
+    def __init__(self, num_qubits):
+        self.alpha = np.random.uniform(0.4, 1.0, num_qubits)
+        self.beta = np.sqrt(1 - self.alpha**2)
+
+    def measure(self):
+        probabilities = np.vstack((self.alpha**2, self.beta**2)).T
+        measurement = np.array([np.random.choice([0, 1], p=p) for p in probabilities])
+        return measurement
+
+    def update(self, best_solution, delta_theta):
+        for i in range(len(self.alpha)):
+            theta = delta_theta if best_solution[i] == 1 else -delta_theta
+            cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+            self.alpha[i], self.beta[i] = (
+                cos_theta * self.alpha[i] - sin_theta * self.beta[i],
+                sin_theta * self.alpha[i] + cos_theta * self.beta[i]
+            )
+
+class QIEO:
+    def __init__(self, num_qubits, max_iterations=1000):
+        self.num_qubits = num_qubits
+        self.max_iterations = max_iterations
+
+    def optimize(self, power_function, data):
+        population_sizes = list(range(10, 510, 30))
+        delta_theta_values = np.arange(0.2, 0.9, 0.1)
+        results = []
+
+        for pop_size in population_sizes:
+            for delta_theta in delta_theta_values:
+                print(f"Running optimization for population size: {pop_size}, delta_theta: {delta_theta}")
+                population = [QuantumIndividual(self.num_qubits) for _ in range(pop_size)]
+                best_solution = None
+                best_power = float('-inf')
+                data_list = list(data)
+
+                for iteration in range(self.max_iterations):
+                    classical_population = np.array([ind.measure() for ind in population])
+                    power_outputs = np.array([power_function(*data_list[i % len(data_list)]) for i in range(len(classical_population))])
+
+                    best_idx = np.argmax(power_outputs)
+                    if power_outputs[best_idx] > best_power:
+                        best_solution = classical_population[best_idx]
+                        best_power = power_outputs[best_idx]
+
+                    for individual in population:
+                        individual.update(best_solution, delta_theta)
+
+                results.append((pop_size, delta_theta, best_power))
+                print(f"Best power for population {pop_size}, delta_theta {delta_theta}: {best_power}")
+
+        # Visualization
+        results = np.array(results)
+        plt.figure(figsize=(12, 6))
+        for delta_theta in delta_theta_values:
+            subset = results[results[:, 1] == delta_theta]
+            plt.plot(subset[:, 0], subset[:, 2], label=f'delta_theta={delta_theta:.1f}', marker='o')
+
+        plt.xlabel('Population Size')
+        plt.ylabel('Optimized Power Output')
+        plt.title('Effect of Population Size and Delta Theta on Optimization')
+        plt.legend()
+        plt.grid()
+        plt.savefig("qieo_population_vs_delta_theta_power.svg", format='svg')
+        plt.show()
+
+# Run Optimization
+data_tuples = list(zip(V_oc_values, I_sc_values, G_theta_values, T_values, v_values, D_values, H_values, L_values))
+qieo = QIEO(num_qubits=8, max_iterations=5000)
+qieo.optimize(P_TOTAL, data_tuples)
