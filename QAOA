@@ -1,0 +1,399 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
+from qiskit_aer import AerSimulator
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import QAOAAnsatz
+from qiskit_algorithms.minimum_eigensolvers import QAOA
+from qiskit_optimization.converters import QuadraticProgramToQubo
+from qiskit_optimization import QuadraticProgram
+from qiskit_algorithms.optimizers import COBYLA, SPSA, POWELL
+from qiskit.primitives import Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_optimization.translators import from_ising
+from qiskit.quantum_info import SparsePauliOp
+
+# Read Solar and Wind Data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli operators for QAOA (Negate to maximize power)
+#pauli_list = [("ZIII", -1), ("IZII", -1), ("IIZI", -1), ("IIIZ", -1)]
+#operator = SparsePauliOp.from_list(pauli_list)
+pauli_list = [
+    ("ZZIIIIII", -1), ("IIZZIIII", -1), ("IIIZZIIZ", -1), ("IIIIZIZZ", -1),
+    ("IIIIIZZI", -1), ("IIIIIZIZ", -1), ("IIIIIIIIZ", -1), ("IZIIIIII", -1)
+]
+operator = SparsePauliOp.from_list(pauli_list)
+# Load IBM Quantum account and set backend
+QiskitRuntimeService.save_account(overwrite=True, channel='ibm_quantum', token='a6681e2bb318b723a9f058a25f8d2f8d457ac8a3e5914aa62b913e5fd3c4e9d0bce3024d003177446b4e22d55fea435d40116913fd252e2acab39203d41d2cbd')
+service = QiskitRuntimeService()
+backend_name = 'ibm_sherbrooke'
+backend = service.backend(backend_name)
+options = Options(optimization_level=3)
+
+# Visualize optimization progress
+iteration_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+
+# Function to run QAOA with different optimizers
+def run_qaoa(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    ansatz = QAOAAnsatz(operator, reps=3)
+    qaoa_instance = QAOA(
+        sampler=Sampler(),
+        optimizer=optimizer,
+        callback=lambda ec, p, m, s: callback(ec, p, m, s, optimizer_name)
+    )
+    return qaoa_instance.compute_minimum_eigenvalue(operator)
+
+# Optimizers
+optimizers = {
+    'COBYLA': COBYLA(maxiter=100),
+    'SPSA': SPSA(maxiter=100),
+    'POWELL': POWELL(options={'maxiter': 100})
+}
+
+# Run QAOA with each optimizer
+qaoa_results = {}
+convergence_points = {}
+for optimizer_name, optimizer in optimizers.items():
+    qaoa_results[optimizer_name] = run_qaoa(optimizer, optimizer_name)
+    convergence_points[optimizer_name] = min(iteration_data[optimizer_name], key=lambda x: x[1])
+
+# Plot results
+colors = {'COBYLA': 'r', 'SPSA': 'g', 'POWELL': 'purple'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (QAOA)', color=colors[optimizer_name])
+    plt.scatter(convergence_points[optimizer_name][0], convergence_points[optimizer_name][1],
+                color=colors[optimizer_name], marker='o', label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_points[optimizer_name][0]} iterations)')
+
+plt.title("Quantum-Optimized Power Output with Different Optimizers")
+plt.xlabel("Iteration")
+plt.ylabel("Energy")
+plt.legend()
+plt.savefig("QAOA_solar_wind1.svg", dpi=300)
+plt.show()
+
+# Classical optimization results
+classical_power_outputs = [P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L) 
+                           for V_oc, I_sc, T, G_theta, v, D, H, L in 
+                           zip(V_oc_values, I_sc_values, T_values, G_theta_values, 
+                               v_values, D_values, H_values, L_values)]
+
+classical_max_power = max(classical_power_outputs)
+classical_max_index = classical_power_outputs.index(classical_max_power)
+classical_max_data_point = {
+    "V_oc": V_oc_values[classical_max_index],
+    "I_sc": I_sc_values[classical_max_index],
+    "T": T_values[classical_max_index],
+    "G_theta": G_theta_values[classical_max_index],
+    "v": v_values[classical_max_index],
+    "D": D_values[classical_max_index],
+    "H": H_values[classical_max_index],
+    "L": L_values[classical_max_index]
+}
+
+print("Classical Optimization:")
+print(f"Maximized Power Output (Classical): {classical_max_power}")
+print(f"Corresponding Data Point: {classical_max_data_point}")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
+from qiskit_aer import AerSimulator
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import QAOAAnsatz
+from qiskit_algorithms.minimum_eigensolvers import QAOA
+from qiskit_optimization.converters import QuadraticProgramToQubo
+from qiskit_optimization import QuadraticProgram
+from qiskit_algorithms.optimizers import AQGD, GradientDescent, NELDER_MEAD
+from qiskit.primitives import Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_optimization.translators import from_ising
+from qiskit.quantum_info import SparsePauliOp
+
+# Read Solar and Wind Data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli operators for QAOA (Negate to maximize power)
+#pauli_list = [("ZIII", -1), ("IZII", -1), ("IIZI", -1), ("IIIZ", -1)]
+#operator = SparsePauliOp.from_list(pauli_list)
+pauli_list = [
+    ("ZZIIIIII", -1), ("IIZZIIII", -1), ("IIIZZIIZ", -1), ("IIIIZIZZ", -1),
+    ("IIIIIZZI", -1), ("IIIIIZIZ", -1), ("IIIIIIIIZ", -1), ("IZIIIIII", -1)
+]
+operator = SparsePauliOp.from_list(pauli_list)
+# Load IBM Quantum account and set backend
+QiskitRuntimeService.save_account(overwrite=True, channel='ibm_quantum', token='a6681e2bb318b723a9f058a25f8d2f8d457ac8a3e5914aa62b913e5fd3c4e9d0bce3024d003177446b4e22d55fea435d40116913fd252e2acab39203d41d2cbd')
+service = QiskitRuntimeService()
+backend_name = 'ibm_sherbrooke'
+backend = service.backend(backend_name)
+options = Options(optimization_level=3)
+
+# Visualize optimization progress
+iteration_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+
+# Function to run QAOA with different optimizers
+def run_qaoa(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    ansatz = QAOAAnsatz(operator, reps=3)
+    qaoa_instance = QAOA(
+        sampler=Sampler(),
+        optimizer=optimizer,
+        callback=lambda ec, p, m, s: callback(ec, p, m, s, optimizer_name)
+    )
+    return qaoa_instance.compute_minimum_eigenvalue(operator)
+
+# Optimizers
+optimizers = {'AQGD': AQGD(maxiter=100),'GradientDescent': GradientDescent(maxiter=100), 'NELDER_MEAD': NELDER_MEAD(maxiter=100)}
+
+# Run QAOA with each optimizer
+qaoa_results = {}
+convergence_points = {}
+for optimizer_name, optimizer in optimizers.items():
+    qaoa_results[optimizer_name] = run_qaoa(optimizer, optimizer_name)
+    convergence_points[optimizer_name] = min(iteration_data[optimizer_name], key=lambda x: x[1])
+
+# Plot results
+colors = {'AQGD': 'c', 'GradientDescent': 'y', 'NELDER_MEAD': 'k'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (QAOA)', color=colors[optimizer_name])
+    plt.scatter(convergence_points[optimizer_name][0], convergence_points[optimizer_name][1],
+                color=colors[optimizer_name], marker='o', label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_points[optimizer_name][0]} iterations)')
+
+plt.title("Quantum-Optimized Power Output with Different Optimizers")
+plt.xlabel("Iteration")
+plt.ylabel("Energy")
+plt.legend()
+plt.savefig("QAOA_solar_wind2.svg", dpi=300)
+plt.show()
+
+# Classical optimization results
+classical_power_outputs = [P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L) 
+                           for V_oc, I_sc, T, G_theta, v, D, H, L in 
+                           zip(V_oc_values, I_sc_values, T_values, G_theta_values, 
+                               v_values, D_values, H_values, L_values)]
+
+classical_max_power = max(classical_power_outputs)
+classical_max_index = classical_power_outputs.index(classical_max_power)
+classical_max_data_point = {
+    "V_oc": V_oc_values[classical_max_index],
+    "I_sc": I_sc_values[classical_max_index],
+    "T": T_values[classical_max_index],
+    "G_theta": G_theta_values[classical_max_index],
+    "v": v_values[classical_max_index],
+    "D": D_values[classical_max_index],
+    "H": H_values[classical_max_index],
+    "L": L_values[classical_max_index]
+}
+
+print("Classical Optimization:")
+print(f"Maximized Power Output (Classical): {classical_max_power}")
+print(f"Corresponding Data Point: {classical_max_data_point}")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
+from qiskit_aer import AerSimulator
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import QAOAAnsatz
+from qiskit_algorithms.minimum_eigensolvers import QAOA
+from qiskit_optimization.converters import QuadraticProgramToQubo
+from qiskit_optimization import QuadraticProgram
+from qiskit_algorithms.optimizers import L_BFGS_B, SLSQP, P_BFGS
+from qiskit.primitives import Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Options
+from qiskit_optimization.translators import from_ising
+from qiskit.quantum_info import SparsePauliOp
+
+# Read Solar and Wind Data
+solar_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_data = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Extract solar panel values
+V_oc_values = solar_data['V_oc'].values
+I_sc_values = solar_data['I_sc'].values
+T_values = solar_data['T'].values
+G_theta_values = solar_data['G_theta'].values
+
+# Extract wind turbine values
+v_values = wind_data['v'].values
+D_values = wind_data['D'].values
+H_values = wind_data['H'].values
+L_values = wind_data['L'].values
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions for power output
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L):
+    return P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+
+# Define Pauli operators for QAOA (Negate to maximize power)
+#pauli_list = [("ZIII", -1), ("IZII", -1), ("IIZI", -1), ("IIIZ", -1)]
+#operator = SparsePauliOp.from_list(pauli_list)
+pauli_list = [
+    ("ZZIIIIII", -1), ("IIZZIIII", -1), ("IIIZZIIZ", -1), ("IIIIZIZZ", -1),
+    ("IIIIIZZI", -1), ("IIIIIZIZ", -1), ("IIIIIIIIZ", -1), ("IZIIIIII", -1)
+]
+operator = SparsePauliOp.from_list(pauli_list)
+# Load IBM Quantum account and set backend
+QiskitRuntimeService.save_account(overwrite=True, channel='ibm_quantum', token='a6681e2bb318b723a9f058a25f8d2f8d457ac8a3e5914aa62b913e5fd3c4e9d0bce3024d003177446b4e22d55fea435d40116913fd252e2acab39203d41d2cbd')
+service = QiskitRuntimeService()
+backend_name = 'ibm_sherbrooke'
+backend = service.backend(backend_name)
+options = Options(optimization_level=3)
+
+# Visualize optimization progress
+iteration_data = {}
+
+def callback(eval_count, parameters, mean, std, optimizer_name):
+    if optimizer_name not in iteration_data:
+        iteration_data[optimizer_name] = []
+    iteration_data[optimizer_name].append((eval_count, mean))
+
+# Function to run QAOA with different optimizers
+def run_qaoa(optimizer, optimizer_name):
+    iteration_data[optimizer_name] = []
+    ansatz = QAOAAnsatz(operator, reps=3)
+    qaoa_instance = QAOA(
+        sampler=Sampler(),
+        optimizer=optimizer,
+        callback=lambda ec, p, m, s: callback(ec, p, m, s, optimizer_name)
+    )
+    return qaoa_instance.compute_minimum_eigenvalue(operator)
+
+# Optimizers
+optimizers = {'L_BFGS_B': L_BFGS_B(maxiter=100),'SLSQP': SLSQP(maxiter=100),'P_BFGS': P_BFGS(options={'maxiter': 100})}
+
+# Run QAOA with each optimizer
+qaoa_results = {}
+convergence_points = {}
+for optimizer_name, optimizer in optimizers.items():
+    qaoa_results[optimizer_name] = run_qaoa(optimizer, optimizer_name)
+    convergence_points[optimizer_name] = min(iteration_data[optimizer_name], key=lambda x: x[1])
+
+# Plot results
+colors = {'L_BFGS_B': 'b', 'SLSQP': 'm', 'P_BFGS': 'orange'}
+plt.figure(figsize=(12, 9))
+
+for optimizer_name, data in iteration_data.items():
+    iterations, energies = zip(*data)
+    plt.plot(iterations, energies, label=f'{optimizer_name} Energy (QAOA)', color=colors[optimizer_name])
+    plt.scatter(convergence_points[optimizer_name][0], convergence_points[optimizer_name][1],
+                color=colors[optimizer_name], marker='o', label=f'{optimizer_name} Lowest Energy (Convergence at {convergence_points[optimizer_name][0]} iterations)')
+
+plt.title("Quantum-Optimized Power Output with Different Optimizers")
+plt.xlabel("Iteration")
+plt.ylabel("Energy")
+plt.legend()
+plt.savefig("QAOA_solar_wind3.svg", dpi=300)
+plt.show()
+
+# Classical optimization results
+classical_power_outputs = [P_TOTAL(V_oc, I_sc, G_theta, T, v, D, H, L) 
+                           for V_oc, I_sc, T, G_theta, v, D, H, L in 
+                           zip(V_oc_values, I_sc_values, T_values, G_theta_values, 
+                               v_values, D_values, H_values, L_values)]
+
+classical_max_power = max(classical_power_outputs)
+classical_max_index = classical_power_outputs.index(classical_max_power)
+classical_max_data_point = {
+    "V_oc": V_oc_values[classical_max_index],
+    "I_sc": I_sc_values[classical_max_index],
+    "T": T_values[classical_max_index],
+    "G_theta": G_theta_values[classical_max_index],
+    "v": v_values[classical_max_index],
+    "D": D_values[classical_max_index],
+    "H": H_values[classical_max_index],
+    "L": L_values[classical_max_index]
+}
+
+print("Classical Optimization:")
+print(f"Maximized Power Output (Classical): {classical_max_power}")
+print(f"Corresponding Data Point: {classical_max_data_point}")
